@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Visualisierung des Standorts</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.3/dist/leaflet.css"
+          integrity="sha256-kLaT2GOSpHechhsozzB+flnD+zUyjE2LlfWPgU04xyI="
+          crossorigin="anonymous"/>
+    <script src="https://unpkg.com/leaflet@1.9.3/dist/leaflet.js"
+            integrity="sha256-WBkoXOwTeyKclOHuWtc+i2uENFpDZ9YPdf5Hf+D7ewM="
+            crossorigin="anonymous"></script>
+    <script src="https://unpkg.com/leaflet-routing-machine/dist/leaflet-routing-machine.js"></script>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        h1 {
+            text-align: center;
+            color: #333;
+            margin-top: 20px;
+        }
+        #controls {
+            display: flex;
+            justify-content: center;
+            margin: 20px;
+        }
+        #controls input {
+            padding: 10px;
+            border: 2px solid #007BFF;
+            border-radius: 5px;
+            width: 300px;
+            margin-right: 10px;
+            box-shadow: 0 2px 5px rgba(0, 0, 0, 0.1);
+        }
+        #controls button {
+            padding: 10px 20px;
+            border: none;
+            border-radius: 5px;
+            color: #fff;
+            background-color: #007BFF;
+            cursor: pointer;
+            box-shadow: 0 2px 5px rgba(0, 0, 0, 0.1);
+            transition: background-color 0.3s;
+        }
+        #controls button:hover {
+            background-color: #0056b3;
+        }
+        #map {
+            height: 400px;
+            width: 100%;
+            margin-top: 20px;
+        }
+        #route-instructions {
+            padding: 15px;
+            background-color: #f9f9f9;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            max-width: 800px;
+            margin: 20px auto;
+            box-shadow: 0 2px 5px rgba(0, 0, 0, 0.1);
+        }
+        .hospital-name {
+            position: absolute;
+            background-color: #fff;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            padding: 5px;
+            box-shadow: 0 2px 5px rgba(0, 0, 0, 0.2);
+            z-index: 1000;
+            pointer-events: none;
+        }
+    </style>
+</head>
+<body>
+    <h1>Nearest Hospital Finder</h1>
+    <div id="controls">
+        <input type="text" id="address-input" placeholder="Enter address here...">
+        <button onclick="geocodeAddress()">Search Address</button>
+        <button onclick="findHospitals()">Find Nearest Hospitals</button>
+    </div>
+    <div id="map"></div>
+    <div id="route-instructions"></div>
+    <div id="hospital-overlay" class="hospital-name" style="display: none;"></div>
+    <script>
+        const map = L.map('map').setView([51.505, -0.09], 13);
+        L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            maxZoom: 19,
+            attribution: '© OpenStreetMap contributors'
+        }).addTo(map);
+
+        let userPosition, routingControl;
+
+        function geocodeAddress() {
+            const input = document.getElementById('address-input').value;
+            fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(input)}`)
+                .then(response => response.json())
+                .then(data => {
+                    if (data.length > 0) {
+                        const firstResult = data[0];
+                        userPosition = [parseFloat(firstResult.lat), parseFloat(firstResult.lon)];
+                        map.setView(userPosition, 13);
+                        L.marker(userPosition).addTo(map)
+                            .bindPopup("Searched Location").openPopup();
+                        findHospitals(); // Sucht automatisch nach Krankenhäusern
+                    } else {
+                        alert('Adresse nicht gefunden.');
+                    }
+                })
+                .catch(error => console.error('Fehler bei der Geocodierung:', error));
+        }
+
+        function findHospitals() {
+            if (!userPosition) {
+                alert("Bitte geben Sie eine Adresse ein oder teilen Sie Ihren Standort.");
+                return;
+            }
+            const radius = 5000; // Suche im Umkreis von 5000 Metern
+            const query = `[out:json][timeout:25];
+            (
+                node["amenity"="hospital"](around:${radius},${userPosition[0]},${userPosition[1]});
+                way["amenity"="hospital"](around:${radius},${userPosition[0]},${userPosition[1]});
+                relation["amenity"="hospital"](around:${radius},${userPosition[0]},${userPosition[1]});
+            );
+            out 1;`; // Gibt nur das erste Ergebnis aus
+            const overpassUrl = 'https://overpass-api.de/api/interpreter?data=' + encodeURIComponent(query);
+
+            fetch(overpassUrl)
+                .then(response => response.json())
+                .then(data => {
+                    if (data.elements.length > 0) {
+                        const el = data.elements[0];
+                        const lat = el.lat || el.center.lat;
+                        const lon = el.lon || el.center.lon;
+                        const name = el.tags.name || "Krankenhaus";
+                        displayRoute(userPosition, [lat, lon], name);
+                        showHospitalName(name, [lat, lon]);
+                    } else {
+                        alert('Keine Krankenhäuser in der Nähe gefunden.');
+                        document.getElementById('hospital-overlay').style.display = 'none';
+                    }
+                })
+                .catch(error => console.error('Fehler beim Abrufen der Krankenhäuser:', error));
+        }
+
+        function displayRoute(start, end, name) {
+            if (routingControl) {
+                map.removeControl(routingControl);
+            }
+            routingControl = L.Routing.control({
+                waypoints: [
+                    L.latLng(start[0], start[1]),
+                    L.latLng(end[0], end[1])
+                ],
+                routeWhileDragging: false,
+                createMarker: function(i, waypoint, n) {
+                    const marker = L.marker(waypoint.latLng, { draggable: false });
+                    if (i === 0) {
+                        marker.bindPopup("Start: Ihr Standort");
+                    } else if (i === n - 1) {
+                        marker.bindPopup("Ziel: " + (name || "Krankenhaus"));
+                    }
+                    return marker;
+                },
+                lineOptions: {
+                    styles: [{color: '#6FA1EC', weight: 4}]
+                },
+                fitSelectedRoutes: true,
+                showAlternatives: false
+            }).addTo(map);
+        }
+
+        function showHospitalName(name, position) {
+            const overlay = document.getElementById('hospital-overlay');
+            overlay.innerHTML = name;
+            overlay.style.display = 'block';
+            overlay.style.left = `${map.latLngToLayerPoint(L.latLng(position[0], position[1])).x}px`;
+            overlay.style.top = `${map.latLngToLayerPoint(L.latLng(position[0], position[1])).y}px`;
+        }
+
+        const options = {
+            enableHighAccuracy: true,
+            timeout: 5000,
+            maximumAge: 0
+        };
+
+        navigator.geolocation.watchPosition(function(pos) {
+            if (!userPosition) {
+                userPosition = [pos.coords.latitude, pos.coords.longitude];
+                L.marker(userPosition).addTo(map)
+                    .bindPopup("Sie sind hier").openPopup();
+                map.setView(userPosition, 13);
+                findHospitals(); // Automatische Krankenhaussuche nach Standortbestimmung
+            }
+        }, function(err) {
+            console.error('Geolokalisierungsfehler:', err);
+            alert("Fehler: " + (err.message || "Ihr Standort kann nicht abgerufen werden."));
+        }, options);
+
+        if (navigator.geolocation) {
+            navigator.geolocation.getCurrentPosition(function(pos) {
+                userPosition = [pos.coords.latitude, pos.coords.longitude];
+                L.marker(userPosition).addTo(map)
+                    .bindPopup("Aktueller Standort").openPopup();
+                map.setView(userPosition, 13);
+                findHospitals();
+            }, function(err) {
+                console.error('Initialer Geolokalisierungsfehler:', err);
+            }, options);
+        } else {
+            alert("Geolokalisierung wird von Ihrem Browser nicht unterstützt.");
+        }
+    </script>
+</body>
+</html>
